@@ -137,8 +137,8 @@ config/camera_sensor/*
 !config/camera_sensor/.gitkeep
 !config/camera_sensor/camera_template.yaml
 
-# Runtime outputs
-output/
+# Ultralytics train runs
+runs/
 output/*
 !output/.gitkeep
 outputs/detections/*

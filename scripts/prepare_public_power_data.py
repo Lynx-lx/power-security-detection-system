@@ -206,8 +206,12 @@ def index_images(src: Path) -> dict[str, Path]:
 def convert_tree(src: Path, img_out: Path, lab_out: Path, prefix: str) -> int:
     xmls = list(src.rglob("*.xml"))
     txts = [p for p in src.rglob("*.txt") if p.name.lower() not in {"classes.txt", "readme.txt"}]
-    n = 0
     img_index = index_images(src)
+    print(
+        f"[info] {prefix}: indexed_images={len(img_index)} xml={len(xmls)} txt={len(txts)}"
+    )
+    n = 0
+    used_stems: set[str] = set()
     if xmls:
         grouped: dict[str, list[Path]] = {}
         for xml_path in xmls:
@@ -224,24 +228,32 @@ def convert_tree(src: Path, img_out: Path, lab_out: Path, prefix: str) -> int:
             stem = f"{prefix}_{stem0}"
             shutil.copy2(img, img_out / f"{stem}{img.suffix.lower()}")
             (lab_out / f"{stem}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            used_stems.add(stem0)
             n += 1
-        return n
     names = None
     names_file = src / "classes.txt"
     if names_file.is_file():
         names = [ln.strip() for ln in names_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
     index_map = FOTL_INDEX_MAP if prefix == "fotl" else None
+    skipped_no_img = 0
+    skipped_empty = 0
     for txt_path in txts:
+        if txt_path.stem in used_stems:
+            continue
         lines = remap_yolo_txt(txt_path, names, index_map)
         if not lines:
+            skipped_empty += 1
             continue
         img = img_index.get(txt_path.stem)
         if img is None:
+            skipped_no_img += 1
             continue
         stem = f"{prefix}_{txt_path.stem}"
         shutil.copy2(img, img_out / f"{stem}{img.suffix.lower()}")
         (lab_out / f"{stem}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         n += 1
+    if txts:
+        print(f"[info] {prefix}: yolo_txt skipped empty={skipped_empty} missing_image={skipped_no_img}")
     return n
 
 
@@ -297,6 +309,20 @@ def main() -> None:
 
     if total == 0:
         raise SystemExit("no labeled images converted; check clones under data/raw/")
+    counts = [0, 0, 0, 0]
+    for lab in lab_out.glob("*.txt"):
+        for line in lab.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            try:
+                cid = int(float(parts[0]))
+            except ValueError:
+                continue
+            if 0 <= cid < 4:
+                counts[cid] += 1
+    names = ("insulator", "bird_nest", "foreign_object", "damaged_insulator")
+    print("[info] box counts: " + ", ".join(f"{n}={c}" for n, c in zip(names, counts)))
     write_splits(img_out, out_root / "splits", args.val_ratio, args.seed)
     print(f"[info] wrote YOLO set under {args.out} ({total} images)")
 

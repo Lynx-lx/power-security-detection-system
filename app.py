@@ -35,6 +35,7 @@ from viscale.risk import DetectionRecord, RiskAssessor
 CHECKPOINTS_REL = "models/checkpoints"
 REAL_WEIGHTS_REL = f"{CHECKPOINTS_REL}/yolov5s_lite.pt"
 DEMO_WEIGHTS_REL = f"{CHECKPOINTS_REL}/yolov5s_lite_demo.pt"
+WORLD_WEIGHTS_REL = f"{CHECKPOINTS_REL}/yolov8s-world.pt"
 DEFAULT_WEIGHTS_REL = REAL_WEIGHTS_REL
 DEFAULT_WEIGHTS = os.environ.get("VISCALE_WEIGHTS", "")
 DEFAULT_ATTN = os.environ.get("VISCALE_ATTN", "eca")
@@ -51,6 +52,10 @@ WEIGHTS_OK_HINT = "已加载微调权重 yolov5s_lite.pt（models/checkpoints/�
 WEIGHTS_ADAPTER_HINT = (
     "⚠️已加载 yolov5s_lite_demo.pt：仅 COCO 主干部分迁移、检测头随机初始化，"
     "未做电力数据微调，不具备真实电力目标识别能力。"
+)
+WEIGHTS_WORLD_HINT = (
+    "已用 YOLO-World 开放词汇检测（绝缘子/鸟巢/异物文本提示）。"
+    "自研 yolov5s_lite 短训权重对生成图几乎无效，故默认走该后端。"
 )
 OUTPUT_REL = "output"
 
@@ -78,6 +83,7 @@ _runtime: dict = {
     "weights_loaded": False,
     "weights_arg": REAL_WEIGHTS_REL,
     "infer_kind": "mock",
+    "openvocab": os.environ.get("VISCALE_OPENVOCAB", "0") == "1",
 }
 
 
@@ -183,6 +189,7 @@ def init_runtime(
     device_name: str,
     camera_config: str | None = None,
     working_distance_m: float = 0.0,
+    openvocab: bool | None = None,
 ) -> None:
     with _lock:
         device = _resolve_device(device_name)
@@ -209,7 +216,13 @@ def init_runtime(
         _runtime["weights_loaded"] = loaded
         _runtime["weights_arg"] = selected or ""
         _runtime["infer_kind"] = kind
-        print("[info] infer_kind=%s demo_mode=%s device=%s attn=%s" % (kind, _runtime["demo_mode"], device, attn))
+        _runtime["openvocab"] = (
+            bool(openvocab) if openvocab is not None else os.environ.get("VISCALE_OPENVOCAB", "0") == "1"
+        )
+        print(
+            "[info] infer_kind=%s openvocab=%s demo_mode=%s device=%s"
+            % (kind, _runtime["openvocab"], _runtime["demo_mode"], device)
+        )
 
 
 def letterbox(image_bgr: np.ndarray, size: int) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -359,14 +372,41 @@ def run_infer(image, conf: float, iou: float, meters_per_pixel: float, imgsz: in
 
         kind = _runtime.get("infer_kind") or "mock"
         weight_rel = _runtime.get("weights_arg") or ""
+        use_openvocab = bool(_runtime.get("openvocab"))
+        if use_openvocab:
+            from viscale.detection.open_vocab import WORLD_WEIGHT_REL, ensure_world_weights, predict_open_vocab
+
+            image_bgr = as_bgr(rgb)
+            wpath = ROOT / WORLD_WEIGHT_REL
+            try:
+                ensure_world_weights(wpath)
+                rows = predict_open_vocab(
+                    image_bgr,
+                    wpath,
+                    conf=float(conf),
+                    iou=float(iou),
+                    device=str(_runtime.get("device") or "cpu"),
+                )
+                _runtime["weights_note"] = WEIGHTS_WORLD_HINT
+                _runtime["infer_kind"] = "openvocab"
+            except Exception as exc:
+                print("[warn] open-vocab infer failed:", type(exc).__name__)
+                use_openvocab = False
+                rows = []
+        else:
+            rows = []
+
         use_weights = (
-            bool(_runtime.get("weights_loaded"))
+            (not use_openvocab)
+            and bool(_runtime.get("weights_loaded"))
             and kind in ("real", "coco_demo")
             and bool(weight_rel)
             and _checkpoint_exists(weight_rel)
         )
 
-        if use_weights and model is not None:
+        if use_openvocab:
+            pass
+        elif use_weights and model is not None:
             image_bgr = as_bgr(rgb)
             canvas, scale, pad = letterbox(image_bgr, int(imgsz))
             tensor = to_tensor(canvas, _runtime["device"])
@@ -445,13 +485,14 @@ def build_ui(imgsz: int):
         gr.Markdown(
             "## 电力安防视觉检测演示\n"
             "上传本地图片，运行轻量化 YOLOv5s（P2 小目标分支 + 注意力，4 类）并输出风险等级。\n"
-            "加载顺序：微调权重 yolov5s_lite.pt → adapter 的 yolov5s_lite_demo.pt（头随机，无电力识别能力）→ 无权重则模拟框。"
+            "默认用 YOLO-World 按「绝缘子 / 鸟巢 / 异物」文本提示检测（适合生成图与公开短训权重对不上的情况）。\n"
+            "关闭开放词汇：环境变量 VISCALE_OPENVOCAB=0 后走 yolov5s_lite.pt。"
         )
         with gr.Row():
             inp = gr.Image(type="filepath", label="上传图片", sources=["upload"])
             out = gr.Image(type="numpy", label="检测框可视化")
         with gr.Row():
-            conf = gr.Slider(0.05, 0.90, value=0.25, step=0.05, label="置信度阈值")
+            conf = gr.Slider(0.01, 0.90, value=0.05, step=0.01, label="置信度阈值")
             iou = gr.Slider(0.10, 0.90, value=0.45, step=0.05, label="NMS IoU")
             mpp = gr.Number(value=0.0, label="米/像素（0 表示不启用尺度）")
         btn = gr.Button("检测并评估风险", variant="primary")
@@ -479,6 +520,12 @@ def parse_args() -> argparse.Namespace:
         help="可选指定权重；默认自动：yolov5s_lite.pt → yolov5s_lite_demo.pt → 模拟框",
     )
     p.add_argument("--attn", type=str, default=DEFAULT_ATTN, choices=("eca", "se", "cbam", "none"))
+    p.add_argument(
+        "--openvocab",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("VISCALE_OPENVOCAB", "0") == "1",
+        help="VISCALE_OPENVOCAB=1 或 --openvocab 时用 YOLO-World；默认走 yolov5s_lite.pt",
+    )
     p.add_argument("--device", type=str, default=DEFAULT_DEVICE)
     p.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
     p.add_argument("--host", type=str, default="127.0.0.1")
@@ -509,6 +556,7 @@ def main() -> None:
         device_name=args.device,
         camera_config=args.camera_config,
         working_distance_m=args.working_distance_m,
+        openvocab=args.openvocab,
     )
     demo = build_ui(args.imgsz)
     demo.launch(
