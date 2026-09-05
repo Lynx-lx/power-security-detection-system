@@ -36,6 +36,7 @@ CHECKPOINTS_REL = "models/checkpoints"
 REAL_WEIGHTS_REL = f"{CHECKPOINTS_REL}/yolov5s_lite.pt"
 DEMO_WEIGHTS_REL = f"{CHECKPOINTS_REL}/yolov5s_lite_demo.pt"
 WORLD_WEIGHTS_REL = f"{CHECKPOINTS_REL}/yolov8s-world.pt"
+POWER_ULTRA_REL = f"{CHECKPOINTS_REL}/yolov8n_power.pt"
 DEFAULT_WEIGHTS_REL = REAL_WEIGHTS_REL
 DEFAULT_WEIGHTS = os.environ.get("VISCALE_WEIGHTS", "")
 DEFAULT_ATTN = os.environ.get("VISCALE_ATTN", "eca")
@@ -57,6 +58,7 @@ WEIGHTS_WORLD_HINT = (
     "已用 YOLO-World 开放词汇检测（绝缘子/鸟巢/异物文本提示）。"
     "自研 yolov5s_lite 短训权重对生成图几乎无效，故默认走该后端。"
 )
+WEIGHTS_ULTRA_HINT = "已加载公开 CPLID+FOTL 微调权重 yolov8n_power.pt。"
 OUTPUT_REL = "output"
 
 BOX_COLORS = [
@@ -219,9 +221,23 @@ def init_runtime(
         _runtime["openvocab"] = (
             bool(openvocab) if openvocab is not None else os.environ.get("VISCALE_OPENVOCAB", "0") == "1"
         )
+        _runtime["ultra_model"] = None
+        ultra_path = ROOT / POWER_ULTRA_REL
+        if (not _runtime["openvocab"]) and ultra_path.is_file():
+            try:
+                from ultralytics import YOLO
+
+                _runtime["ultra_model"] = YOLO(str(ultra_path))
+                _runtime["infer_kind"] = "ultra"
+                _runtime["demo_mode"] = False
+                _runtime["weights_loaded"] = True
+                _runtime["weights_note"] = WEIGHTS_ULTRA_HINT
+                print("[info] loaded", POWER_ULTRA_REL)
+            except Exception as exc:
+                print("[warn] yolov8n_power load failed:", type(exc).__name__)
         print(
             "[info] infer_kind=%s openvocab=%s demo_mode=%s device=%s"
-            % (kind, _runtime["openvocab"], _runtime["demo_mode"], device)
+            % (_runtime["infer_kind"], _runtime["openvocab"], _runtime["demo_mode"], device)
         )
 
 
@@ -404,8 +420,40 @@ def run_infer(image, conf: float, iou: float, meters_per_pixel: float, imgsz: in
             and _checkpoint_exists(weight_rel)
         )
 
+        ultra_model = _runtime.get("ultra_model")
         if use_openvocab:
             pass
+        elif (not use_openvocab) and ultra_model is not None:
+            image_bgr = as_bgr(rgb)
+            result = ultra_model.predict(
+                image_bgr,
+                conf=float(conf),
+                iou=float(iou),
+                imgsz=int(imgsz),
+                device=str(_runtime.get("device") or "cpu"),
+                verbose=False,
+            )[0]
+            rows = []
+            names = list(POWER_SECURITY_CLASSES)
+            if result.boxes is not None:
+                for box, score, cid in zip(
+                    result.boxes.xyxy.cpu().numpy(),
+                    result.boxes.conf.cpu().numpy(),
+                    result.boxes.cls.cpu().numpy().astype(int),
+                ):
+                    cid_i = int(cid)
+                    name = names[cid_i] if 0 <= cid_i < len(names) else str(cid_i)
+                    rows.append(
+                        {
+                            "cls_id": cid_i,
+                            "cls_name": name,
+                            "conf": float(score),
+                            "xyxy": [int(round(v)) for v in box.tolist()],
+                        }
+                    )
+            _runtime["weights_note"] = WEIGHTS_ULTRA_HINT
+            _runtime["infer_kind"] = "ultra"
+            _runtime["demo_mode"] = False
         elif use_weights and model is not None:
             image_bgr = as_bgr(rgb)
             canvas, scale, pad = letterbox(image_bgr, int(imgsz))
@@ -484,15 +532,14 @@ def build_ui(imgsz: int):
     with gr.Blocks(title="电力安防 · 检测与风险评估") as demo:
         gr.Markdown(
             "## 电力安防视觉检测演示\n"
-            "上传本地图片，运行轻量化 YOLOv5s（P2 小目标分支 + 注意力，4 类）并输出风险等级。\n"
-            "默认用 YOLO-World 按「绝缘子 / 鸟巢 / 异物」文本提示检测（适合生成图与公开短训权重对不上的情况）。\n"
-            "关闭开放词汇：环境变量 VISCALE_OPENVOCAB=0 后走 yolov5s_lite.pt。"
+            "上传本地图片，检测绝缘子 / 鸟巢 / 异物 / 破损绝缘子，并输出风险等级。\n"
+            "本地若有 `models/checkpoints/yolov8n_power.pt`，优先用公开数据微调权重。"
         )
         with gr.Row():
             inp = gr.Image(type="filepath", label="上传图片", sources=["upload"])
             out = gr.Image(type="numpy", label="检测框可视化")
         with gr.Row():
-            conf = gr.Slider(0.01, 0.90, value=0.05, step=0.01, label="置信度阈值")
+            conf = gr.Slider(0.01, 0.90, value=0.25, step=0.01, label="置信度阈值")
             iou = gr.Slider(0.10, 0.90, value=0.45, step=0.05, label="NMS IoU")
             mpp = gr.Number(value=0.0, label="米/像素（0 表示不启用尺度）")
         btn = gr.Button("检测并评估风险", variant="primary")
@@ -508,6 +555,13 @@ def build_ui(imgsz: int):
             outputs=[out, risk, table],
             api_name="infer",
         )
+        example_paths = [
+            str(ROOT / "data" / "samples" / name)
+            for name in ("scene2_orig.png", "scene3_orig.png", "scene1_orig.png")
+            if (ROOT / "data" / "samples" / name).is_file()
+        ]
+        if example_paths:
+            gr.Examples(examples=[[p] for p in example_paths], inputs=inp, label="示例巡检图")
     return demo
 
 

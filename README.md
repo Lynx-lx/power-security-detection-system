@@ -46,22 +46,18 @@
 
 ## 项目效果展示
 
-`assets/demo/` 用于存放 **APP 界面截图**、**算法推理效果图**（检测框、风险等级等）。本仓库只保留该目录结构，**不附带真实截图二进制文件**；请在本地运行 `python app.py` 后自行截图，将 PNG 放到该目录并保持下列文件名，README 中的引用即可显示。
+本地演示截图与检测效果如下（`assets/demo/`）。复现时在项目根目录运行 `python app.py`，上传巡检图即可得到同类结果。
 
-<!-- 放入 ./assets/demo/app_ui.png 后，下方图片会在 GitHub 上显示 -->
 <p><b>Gradio 演示界面</b></p>
-<img src="./assets/demo/app_ui.png" width="600" alt="Gradio APP 界面截图（请自行放入 app_ui.png）">
+<img src="./assets/demo/app_ui.png" width="600" alt="Gradio 演示界面截图">
 
-<!-- 放入 ./assets/demo/infer_result.png 后，下方图片会在 GitHub 上显示 -->
 <p><b>检测与风险评估效果</b></p>
-<img src="./assets/demo/infer_result.png" width="600" alt="算法推理效果图（请自行放入 infer_result.png）">
-
-建议文件名：
+<img src="./assets/demo/infer_result.png" width="600" alt="白框检测与风险等级可视化">
 
 | 文件 | 内容 |
 |------|------|
-| `./assets/demo/app_ui.png` | 本地演示页（上传区、阈值、风险等级） |
-| `./assets/demo/infer_result.png` | 带检测框的推理可视化 |
+| `./assets/demo/app_ui.png` | Gradio 上传、阈值与风险面板 |
+| `./assets/demo/infer_result.png` | 检测框 + 风险等级（公开数据微调权重） |
 
 ---
 
